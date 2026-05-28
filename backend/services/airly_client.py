@@ -10,6 +10,9 @@ Dokumentacja: https://developer.airly.org/docs
 from __future__ import annotations
 
 import logging
+import re
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -53,40 +56,121 @@ class AirlyError(Exception):
     """Błąd komunikacji z Airly API."""
 
 
-class AirlyClient:
-    """Cienka warstwa nad Airly REST API.
+def _load_keys_from_file(path: str) -> list[str]:
+    """Wczytaj klucze Airly z pliku tekstowego (jeden klucz na linię).
 
-    Klient sam nie cache'uje — to robi warstwa wyżej (services/cache.py).
+    Akceptuje "1. KLUCZ", "1) KLUCZ" lub samo "KLUCZ". Puste linie i komentarze
+    (#) pomija. Zachowuje kolejność i usuwa duplikaty.
+    """
+    keys: list[str] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                match = re.match(r"^\d+[.)]\s*(.+)$", line)
+                token = (match.group(1) if match else line).split()[0].strip()
+                if token:
+                    keys.append(token)
+    except FileNotFoundError:
+        return []
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+class KeyManager:
+    """Pula kluczy Airly z rotacją i cooldownem po wyczerpaniu (429).
+
+    Klient prosi o `available_key()`; gdy klucz dostanie 429/401, woła
+    `mark_exhausted(key)`, co odkłada go na `cooldown` sekund. Kolejne żądania
+    biorą następny dostępny klucz. Gdy wszystkie są na cooldownie — zwraca None.
     """
 
-    def __init__(self, api_key: str = None, timeout: float = 10.0):
-        self.api_key = api_key or config.AIRLY_API_KEY
+    def __init__(self, keys: list[str], cooldown: float = 600.0):
+        self._keys = keys
+        self._cooldown = cooldown
+        self._blocked_until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_config(cls) -> "KeyManager":
+        keys = _load_keys_from_file(config.AIRLY_KEYS_FILE)
+        if not keys and config.AIRLY_API_KEY and config.AIRLY_API_KEY != "/us":
+            keys = [config.AIRLY_API_KEY]
+        cooldown = getattr(config, "AIRLY_KEY_COOLDOWN", 600)
+        logger.info("Airly KeyManager: załadowano %d kluczy z %s.", len(keys), config.AIRLY_KEYS_FILE)
+        return cls(keys, cooldown)
+
+    def has_any(self) -> bool:
+        return bool(self._keys)
+
+    def available_key(self) -> Optional[str]:
+        now = time.monotonic()
+        with self._lock:
+            for key in self._keys:
+                if self._blocked_until.get(key, 0.0) <= now:
+                    return key
+        return None
+
+    def mark_exhausted(self, key: str) -> None:
+        with self._lock:
+            self._blocked_until[key] = time.monotonic() + self._cooldown
+        logger.warning("Klucz Airly …%s wyczerpany — cooldown %.0fs.", key[-4:], self._cooldown)
+
+    def stats(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            available = sum(1 for k in self._keys if self._blocked_until.get(k, 0.0) <= now)
+            return {"total": len(self._keys), "available": available}
+
+
+class AirlyClient:
+    """Cienka warstwa nad Airly REST API z rotacją kluczy.
+
+    Klient sam nie cache'uje pomiarów — to robi warstwa wyżej (services/cache.py).
+    """
+
+    def __init__(self, key_manager: "KeyManager" = None, timeout: float = 10.0):
+        self.keys = key_manager or KeyManager.from_config()
         self.base_url = config.AIRLY_BASE_URL
         self.timeout = timeout
-        if not self.api_key:
-            logger.warning("AIRLY_API_KEY nie jest ustawiony — wywołania Airly nie zadziałają.")
+        if not self.keys.has_any():
+            logger.warning("Brak kluczy Airly — wywołania Airly nie zadziałają.")
 
     # ---------- niskopoziomowe helpery ----------
 
-    def _headers(self) -> dict:
+    def _headers(self, key: str) -> dict:
         return {
             "Accept": "application/json",
             "Accept-Language": "pl",
-            "apikey": self.api_key,
+            "apikey": key,
         }
 
     def _get(self, path: str, params: dict) -> dict:
+        """Wykonaj GET, rotując klucze przy 429/401/403 aż któryś zadziała."""
         url = f"{self.base_url}{path}"
-        try:
-            response = requests.get(url, headers=self._headers(), params=params, timeout=self.timeout)
-        except requests.RequestException as exc:
-            raise AirlyError(f"Sieć: {exc}") from exc
+        while True:
+            key = self.keys.available_key()
+            if key is None:
+                raise AirlyError("Wszystkie klucze Airly wyczerpane (limit 429).")
+            try:
+                response = requests.get(url, headers=self._headers(key),
+                                        params=params, timeout=self.timeout)
+            except requests.RequestException as exc:
+                raise AirlyError(f"Sieć: {exc}") from exc
 
-        if response.status_code == 429:
-            raise AirlyError("Limit zapytań Airly osiągnięty (429).")
-        if not response.ok:
-            raise AirlyError(f"Airly {response.status_code}: {response.text[:200]}")
-        return response.json()
+            if response.status_code in (429, 401, 403):
+                self.keys.mark_exhausted(key)
+                continue  # spróbuj kolejnego klucza
+            if not response.ok:
+                raise AirlyError(f"Airly {response.status_code}: {response.text[:200]}")
+            return response.json()
 
     # ---------- publiczne metody ----------
 

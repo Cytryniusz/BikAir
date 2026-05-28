@@ -1,0 +1,22 @@
+# === SEKRETY — NIGDY nie commitować! ===
+airlyAPI.txt
+.env
+*.env
+backend/.env
+
+# === Środowisko wirtualne / IDE ===
+.venv/
+venv/
+.idea/
+.vscode/
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# === Dane generowane automatycznie (duże, pobierane z OSM) ===
+backend/data/graphs/*.graphml
+backend/data/cache/
+backend/cache/

@@ -14,6 +14,11 @@ GRAPH_DIR.mkdir(parents=True, exist_ok=True)
 AIRLY_API_KEY = os.getenv("AIRLY_API_KEY", "")
 AIRLY_BASE_URL = "https://airapi.airly.eu/v2"
 
+# Pula kluczy Airly: plik z kluczami (jeden na linię; format "1. KLUCZ" też działa).
+# Rotujemy je, gdy któryś dostanie 429 (limit planu darmowego).
+AIRLY_KEYS_FILE = os.getenv("AIRLY_KEYS_FILE", str(BASE_DIR.parent / "airlyAPI.txt"))
+AIRLY_KEY_COOLDOWN = int(os.getenv("AIRLY_KEY_COOLDOWN", 600))
+
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", 5000))
 DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"

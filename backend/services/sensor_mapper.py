@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Iterable
+from typing import Callable, Iterable
 
 import networkx as nx
 
@@ -38,41 +38,52 @@ def _edge_midpoint(graph: nx.MultiDiGraph, u: int, v: int) -> tuple[float, float
     return (nu["y"] + nv["y"]) / 2, (nu["x"] + nv["x"]) / 2
 
 
-def interpolate_aqi(lat: float, lng: float, sensors: list[Sensor],
-                    k: int = 4, power: float = 2.0,
-                    max_distance_m: float = 5000.0) -> float | None:
-    """Oszacuj AQI w punkcie metodą IDW z k najbliższych czujników.
+def interpolate_value(lat: float, lng: float, sensors: list[Sensor],
+                      getter: Callable[[Sensor], float | None],
+                      k: int = 4, power: float = 2.0,
+                      max_distance_m: float = 5000.0) -> float | None:
+    """Oszacuj dowolną wielkość czujnika w punkcie metodą IDW.
 
+    - getter:          funkcja wyciągająca wartość z czujnika (np. lambda s: s.aqi)
     - k:               ile czujników brać do interpolacji
     - power:           wykładnik IDW (2 to standard)
     - max_distance_m:  ignoruj czujniki dalsze niż tyle metrów
 
-    Zwraca None, jeśli żaden czujnik nie jest w zasięgu.
+    Zwraca None, jeśli żaden czujnik z wartością nie jest w zasięgu.
     """
-    valid = [s for s in sensors if s.aqi is not None]
+    valid = [(s, getter(s)) for s in sensors]
+    valid = [(s, v) for s, v in valid if v is not None]
     if not valid:
         return None
 
-    distances = [(s, haversine_distance(lat, lng, s.lat, s.lng)) for s in valid]
-    distances = [(s, d) for s, d in distances if d <= max_distance_m]
+    distances = [(s, v, haversine_distance(lat, lng, s.lat, s.lng)) for s, v in valid]
+    distances = [(s, v, d) for s, v, d in distances if d <= max_distance_m]
     if not distances:
         return None
 
     # Jeśli punkt pokrywa się z czujnikiem — zwróć wprost.
-    for s, d in distances:
+    for s, v, d in distances:
         if d < 1.0:
-            return float(s.aqi)
+            return float(v)
 
-    distances.sort(key=lambda pair: pair[1])
+    distances.sort(key=lambda triple: triple[2])
     nearest = distances[:k]
 
     weight_sum = 0.0
     value_sum = 0.0
-    for s, d in nearest:
+    for s, v, d in nearest:
         w = 1.0 / (d ** power)
         weight_sum += w
-        value_sum += w * s.aqi
+        value_sum += w * v
     return value_sum / weight_sum
+
+
+def interpolate_aqi(lat: float, lng: float, sensors: list[Sensor],
+                    k: int = 4, power: float = 2.0,
+                    max_distance_m: float = 5000.0) -> float | None:
+    """Oszacuj AQI w punkcie metodą IDW z k najbliższych czujników."""
+    return interpolate_value(lat, lng, sensors, lambda s: s.aqi,
+                             k=k, power=power, max_distance_m=max_distance_m)
 
 
 def annotate_graph_with_aqi(graph: nx.MultiDiGraph, sensors: list[Sensor],
