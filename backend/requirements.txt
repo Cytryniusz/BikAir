@@ -1,0 +1,9 @@
+Flask==3.0.3
+flask-cors==4.0.1
+requests==2.32.3
+python-dotenv==1.0.1
+osmnx==1.9.4
+networkx==3.3
+shapely==2.0.5
+numpy==1.26.4
+scipy==1.13.1

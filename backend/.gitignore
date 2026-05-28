@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+data/graphs/*.graphml
+data/cache/
+.pytest_cache/
+.vscode/
+.idea/
