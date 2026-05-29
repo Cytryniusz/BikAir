@@ -49,8 +49,8 @@ def load_graph_for_area(area_key: str, force_refresh: bool = False) -> nx.MultiD
     area = config.SUPPORTED_AREAS[area_key]
     north, south, east, west = area["bbox"]
 
-    # OSMnx 1.9 API: graph_from_bbox(north, south, east, west, network_type=...)
-    graph = ox.graph_from_bbox(north=north, south=south, east=east, west=west,
+    # OSMnx 2.x API: bbox=(left, bottom, right, top) = (west, south, east, north)
+    graph = ox.graph_from_bbox(bbox=(west, south, east, north),
                                 network_type="bike", simplify=True)
 
     # Dodajemy length (w metrach) — używamy przy liczeniu wag.

@@ -52,9 +52,85 @@
   @keyframes s{to{transform:rotate(360deg)}}
   .marker-pin{width:24px;height:24px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)}
   .marker-pin span{transform:rotate(45deg);display:block;text-align:center;line-height:20px;color:#fff;font-weight:700;font-size:11px}
+
+  @media(max-width:640px){
+    body{flex-direction:column;overflow-x:hidden}
+    #sidebar{width:100%;min-width:unset;height:auto;max-height:55vh;border-right:none;border-top:2px solid var(--line);order:2}
+    #map{width:100%;height:45vh;flex:none;order:1}
+    #loadOverlay{width:100%}
+    .brand{padding:10px 14px}
+    .section{padding:12px 14px}
+    .stats{grid-template-columns:1fr 1fr}
+    .route-card .swatch{width:22px}
+  }
+
+  /* Loading overlay — zakrywa sidebar aż backend będzie gotowy */
+  #loadOverlay{
+    position:fixed; top:0; left:0; width:360px; height:100%;
+    background:rgba(244,247,242,0.97);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    z-index:9999; gap:16px;
+  }
+  #loadOverlay .load-logo{font-weight:800;font-size:26px;letter-spacing:-.02em;margin-bottom:4px}
+  #loadOverlay .load-logo .a{color:var(--lime-deep)}
+  #loadOverlay .load-spin{
+    width:40px;height:40px;
+    border:3px solid var(--line);
+    border-top-color:var(--lime-deep);
+    border-radius:50%;
+    animation:s .8s linear infinite;
+  }
+  #loadOverlay .load-steps{
+    width:260px; display:flex; flex-direction:column; gap:8px;
+  }
+  #loadOverlay .step{
+    display:flex; align-items:center; gap:10px;
+    font-size:13px; color:var(--ink-mute);
+  }
+  #loadOverlay .step.active{color:var(--ink); font-weight:600;}
+  #loadOverlay .step.done{color:var(--lime-deep);}
+  #loadOverlay .step-icon{
+    width:20px;height:20px;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;
+    font-size:14px;
+  }
+  #loadOverlay .step-spin{
+    width:16px;height:16px;
+    border:2px solid var(--line);
+    border-top-color:var(--lime-deep);
+    border-radius:50%;
+    animation:s .7s linear infinite;
+    flex-shrink:0;
+  }
+  #loadOverlay .load-sub{font-size:11px;color:var(--ink-mute);text-align:center;max-width:260px;line-height:1.5}
+  #loadOverlay .progress-bar{
+    width:260px;height:4px;background:var(--line);border-radius:4px;overflow:hidden;
+  }
+  #loadOverlay .progress-fill{
+    height:100%;background:var(--lime-deep);border-radius:4px;
+    transition:width .5s ease; width:0%;
+  }
 </style>
 </head>
 <body>
+  <!-- Overlay ładowania — znika gdy backend zgłosi gotowość -->
+  <div id="loadOverlay">
+    <div class="load-logo">Bik<span class="a">Air</span></div>
+    <div class="load-spin"></div>
+    <div class="load-steps">
+      <div class="step active" id="stepSensors">
+        <div class="step-spin" id="iconSensors"></div>
+        <span>Pobieranie czujników Airly</span>
+      </div>
+      <div class="step" id="stepGraph">
+        <div class="step-icon" id="iconGraph">○</div>
+        <span>Ładowanie mapy dróg rowerowych</span>
+      </div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="load-sub" id="loadSub">Przygotowywanie aplikacji…</div>
+  </div>
+
   <aside id="sidebar">
     <div class="brand">
       <div>
@@ -104,11 +180,12 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const API = "";                       // ten sam origin co backend
+const API = "";
 let map, areas = {}, currentArea = "warsaw";
 let startLL = null, endLL = null;
 let startMarker = null, endMarker = null;
 let routeGroup = null, sensorGroup = null;
+let sensorsShownOnce = false;
 
 function aqiColor(aqi){
   if(aqi == null) return "#9aa6a0";
@@ -148,7 +225,6 @@ function setEnd(latlng){
 function fmt(ll){return ll.lat.toFixed(5)+", "+ll.lng.toFixed(5);}
 
 async function init(){
-  // mapa
   map = L.map("map").setView([52.2297,21.0122], 12);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(map);
@@ -156,7 +232,7 @@ async function init(){
   sensorGroup = L.layerGroup().addTo(map);
 
   map.on("click", e=>{
-    if(!startLL || (startLL && endLL)){      // brak startu lub komplet → zacznij od nowa
+    if(!startLL || (startLL && endLL)){
       if(endMarker){map.removeLayer(endMarker);endMarker=null;endLL=null;document.getElementById("endInput").value="";}
       setStart(e.latlng);
     } else {
@@ -165,7 +241,6 @@ async function init(){
     }
   });
 
-  // obszary z backendu
   try{
     const r = await fetch(API+"/api/areas").then(r=>r.json());
     const sel = document.getElementById("area");
@@ -179,7 +254,54 @@ async function init(){
 
   document.getElementById("routeBtn").onclick = onRouteClick;
   document.getElementById("resetBtn").onclick = resetAll;
-  loadSensors();
+
+  waitForReady();
+}
+
+async function waitForReady(){
+  const overlay   = document.getElementById("loadOverlay");
+  const sub       = document.getElementById("loadSub");
+  const fill      = document.getElementById("progressFill");
+  const stepSens  = document.getElementById("stepSensors");
+  const iconSens  = document.getElementById("iconSensors");
+  const stepGraph = document.getElementById("stepGraph");
+  const iconGraph = document.getElementById("iconGraph");
+
+  while(true){
+    try{
+      const r = await fetch(API+"/api/ready").then(res=>res.json());
+
+      if(r.sensors_done){
+        // Czujniki gotowe — zaktualizuj krok i pokaż je na mapie
+        stepSens.className = "step done";
+        iconSens.outerHTML = '<div class="step-icon" id="iconSensors">✓</div>';
+        if(!sensorsShownOnce){ sensorsShownOnce=true; loadSensors(); }
+
+        if(!r.graph_done){
+          stepGraph.className = "step active";
+          iconGraph.outerHTML = '<div class="step-spin" id="iconGraph"></div>';
+          sub.textContent = "Ładowanie mapy dróg — przy pierwszym uruchomieniu może to potrwać 1–2 min.";
+          fill.style.width = "50%";
+        }
+      } else {
+        sub.textContent = "Pobieranie danych z serwisu Airly…";
+        fill.style.width = "10%";
+      }
+
+      if(r.ready){
+        fill.style.width = "100%";
+        stepGraph.className = "step done";
+        document.getElementById("iconGraph").outerHTML = '<div class="step-icon" id="iconGraph">✓</div>';
+        // Krótka pauza żeby użytkownik zobaczył "100%" zanim overlay zniknie
+        await new Promise(res=>setTimeout(res, 400));
+        overlay.style.display = "none";
+        return;
+      }
+    }catch(e){
+      sub.textContent = "Łączę z backendem…";
+    }
+    await new Promise(res=>setTimeout(res, 2000));
+  }
 }
 
 function resetAll(){
@@ -199,7 +321,6 @@ async function geocode(q){
 }
 
 async function onRouteClick(){
-  // jeśli pola mają adresy a nie ma markerów → geokoduj
   const si=document.getElementById("startInput").value.trim();
   const ei=document.getElementById("endInput").value.trim();
   if(!startLL && si){ setStatus("Szukam adresu startu…"); const g=await geocode(si); if(g) setStart(L.latLng(g.lat,g.lng)); }
@@ -233,7 +354,7 @@ const ROUTE_STYLE = {
 
 function drawRoutes(data){
   routeGroup.clearLayers();
-  const order = [...data.routes].sort((a,b)=>(a.recommended?1:0)-(b.recommended?1:0)); // recommended na wierzchu
+  const order = [...data.routes].sort((a,b)=>(a.recommended?1:0)-(b.recommended?1:0));
   let bounds=null;
   order.forEach(rt=>{
     const st = ROUTE_STYLE[rt.profile] || {color:"#888",weight:5};
@@ -242,15 +363,17 @@ function drawRoutes(data){
   });
   if(bounds) map.fitBounds(bounds, {padding:[40,40]});
 
-  // panel wyników
   const wrap = document.getElementById("results");
   let html = "";
   if(!data.air_quality_available)
-    html += '<div class="status show info" style="margin:0 0 10px">Brak danych Airly (limit API) — trasy liczone po dystansie. Po dodaniu kluczy pojawi się wariant „najzdrowszy".</div>';
+    html += '<div class="status show info" style="margin:0 0 10px">Brak danych Airly (limit API wyczerpany). Mapa AQI pojawi się po dodaniu kluczy.</div>';
   data.routes.forEach(rt=>{
     const s = rt.stats, st = ROUTE_STYLE[rt.profile]||{color:"#888"};
+    const swatchStyle = st.dashArray
+      ? `background:repeating-linear-gradient(90deg,${st.color} 0,${st.color} 7px,transparent 7px,transparent 16px);border-radius:0`
+      : `background:${st.color}`;
     html += `<div class="route-card ${rt.recommended?'rec':''}">
-      <h3><span class="swatch" style="background:${st.color}"></span>${rt.label}
+      <h3><span class="swatch" style="${swatchStyle}"></span>${rt.label}
         ${rt.recommended?'<span class="badge">zalecana</span>':''}</h3>
       <div class="stats">
         <div class="stat"><div class="k">Dystans</div><div class="v">${s.distance_km}<small>km</small></div></div>
